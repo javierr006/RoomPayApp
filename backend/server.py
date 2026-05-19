@@ -417,7 +417,7 @@ async def join_group(join_data: GroupJoin, current_user: dict = Depends(get_curr
     # Agregamos al usuario como miembro
     await db.groups.update_one(
         {"id": group["id"]},
-        {"$push": {"miembros": current_user["id"]}}
+        {"$addToSet": {"miembros": current_user["id"]}}
     )
     
     # Creamos notificación para los demás miembros
@@ -466,46 +466,68 @@ async def create_expense(expense_data: ExpenseCreate, current_user: dict = Depen
     Crea un nuevo gasto y lo divide entre los miembros.
     Puede dividirse equitativamente o de forma manual.
     """
-    # Verificamos que el grupo existe y el usuario es miembro
     group = await db.groups.find_one({"id": expense_data.grupo_id})
+
     if not group:
         raise HTTPException(status_code=404, detail="Grupo no encontrado")
+
     if current_user["id"] not in group["miembros"]:
         raise HTTPException(status_code=403, detail="No eres miembro de este grupo")
-    
+
     expense_id = str(uuid.uuid4())
-    
-    # Determinamos entre quiénes se divide
+
+    # Determinamos entre quiénes se divide.
+    # Si el frontend manda una lista, usamos esa.
+    # Si no manda nada, usamos todos los miembros del grupo.
     if expense_data.dividir_entre:
-        divisores = expense_data.dividir_entre
+        divisores = list(expense_data.dividir_entre)
     else:
-        divisores = group["miembros"]  # Todos los miembros
-    
-    # Calculamos la división
+        divisores = list(group["miembros"])
+
+    # Aseguramos que el usuario que pagó también cuente dentro del total.
+    # Ejemplo: gasto de Q100 entre 2 personas = Q50 y Q50.
+    if current_user["id"] not in divisores:
+        divisores.append(current_user["id"])
+
+    # Eliminamos duplicados por si el usuario viene repetido.
+    divisores = list(set(divisores))
+
+    if len(divisores) == 0:
+        raise HTTPException(status_code=400, detail="No hay miembros para dividir el gasto")
+
     divisiones = []
+
     if expense_data.division_manual:
         # División manual
         for user_id, monto in expense_data.division_manual.items():
-            if user_id != current_user["id"]:  # El que paga no se debe a sí mismo
+            if user_id not in group["miembros"]:
+                raise HTTPException(status_code=400, detail="Uno de los usuarios no pertenece al grupo")
+
+            if user_id != current_user["id"]:
                 divisiones.append({
                     "usuario_id": user_id,
-                    "monto": monto,
+                    "monto": round(float(monto), 2),
                     "monto_pagado": 0,
                     "estado": "pendiente"
                 })
     else:
         # División equitativa
-        monto_por_persona = expense_data.monto / len(divisores)
+        monto_por_persona = round(expense_data.monto / len(divisores), 2)
+
         for user_id in divisores:
-            if user_id != current_user["id"]:  # El que paga no se debe a sí mismo
+            if user_id not in group["miembros"]:
+                raise HTTPException(status_code=400, detail="Uno de los usuarios no pertenece al grupo")
+
+            # El que pagó también cuenta en la división,
+            # pero no se crea deuda contra sí mismo.
+            if user_id != current_user["id"]:
                 divisiones.append({
                     "usuario_id": user_id,
-                    "monto": round(monto_por_persona, 2),
+                    "monto": monto_por_persona,
                     "monto_pagado": 0,
                     "estado": "pendiente"
                 })
-    
-    # Creamos el gasto
+
     new_expense = {
         "id": expense_id,
         "grupo_id": expense_data.grupo_id,
@@ -516,10 +538,10 @@ async def create_expense(expense_data: ExpenseCreate, current_user: dict = Depen
         "divisiones": divisiones,
         "fecha": datetime.utcnow()
     }
-    
+
     await db.expenses.insert_one(new_expense)
-    
-    # Notificamos a los deudores
+
+    # Notificamos solo a los deudores
     for division in divisiones:
         await create_notification(
             division["usuario_id"],
@@ -528,25 +550,26 @@ async def create_expense(expense_data: ExpenseCreate, current_user: dict = Depen
             f"{current_user['nombre']} agregó un gasto: {expense_data.descripcion} (${division['monto']:.2f})",
             {"gasto_id": expense_id, "grupo_id": expense_data.grupo_id}
         )
-    
+
     return await get_expense_with_details(new_expense)
+
 
 @api_router.get("/expenses/group/{group_id}")
 async def list_group_expenses(group_id: str, current_user: dict = Depends(get_current_user)):
     """Lista todos los gastos de un grupo"""
-    # Verificamos acceso al grupo
     group = await db.groups.find_one({"id": group_id})
+
     if not group or current_user["id"] not in group["miembros"]:
         raise HTTPException(status_code=403, detail="No tienes acceso a este grupo")
-    
-    # Obtenemos los gastos ordenados por fecha (más recientes primero)
+
     expenses = await db.expenses.find({"grupo_id": group_id}).sort("fecha", -1).to_list(100)
-    
+
     result = []
     for expense in expenses:
         result.append(await get_expense_with_details(expense))
-    
+
     return result
+
 
 @api_router.post("/expenses/{expense_id}/pay")
 async def pay_expense(expense_id: str, payment: PaymentCreate, current_user: dict = Depends(get_current_user)):
@@ -554,27 +577,25 @@ async def pay_expense(expense_id: str, payment: PaymentCreate, current_user: dic
     Registra un pago parcial o total de un gasto.
     Actualiza el estado según el monto pagado.
     """
-    # Buscamos el gasto
     expense = await db.expenses.find_one({"id": expense_id})
+
     if not expense:
         raise HTTPException(status_code=404, detail="Gasto no encontrado")
-    
-    # Buscamos la división correspondiente al usuario
+
     division_index = None
+
     for i, div in enumerate(expense["divisiones"]):
         if div["usuario_id"] == current_user["id"]:
             division_index = i
             break
-    
+
     if division_index is None:
         raise HTTPException(status_code=400, detail="No tienes deuda en este gasto")
-    
-    # Actualizamos el pago
+
     division = expense["divisiones"][division_index]
     nuevo_monto_pagado = division["monto_pagado"] + payment.monto
     nuevo_estado = get_payment_status(nuevo_monto_pagado, division["monto"], expense["fecha"])
-    
-    # Actualizamos en la base de datos
+
     await db.expenses.update_one(
         {"id": expense_id, f"divisiones.{division_index}.usuario_id": current_user["id"]},
         {"$set": {
@@ -583,8 +604,7 @@ async def pay_expense(expense_id: str, payment: PaymentCreate, current_user: dic
             f"divisiones.{division_index}.fecha_pago": datetime.utcnow() if nuevo_estado == "solvente" else None
         }}
     )
-    
-    # Notificamos al acreedor
+
     await create_notification(
         expense["pagado_por"],
         "pago_recibido",
@@ -592,7 +612,7 @@ async def pay_expense(expense_id: str, payment: PaymentCreate, current_user: dic
         f"{current_user['nombre']} pagó ${payment.monto:.2f} del gasto: {expense['descripcion']}",
         {"gasto_id": expense_id}
     )
-    
+
     return {
         "mensaje": "Pago registrado exitosamente",
         "nuevo_estado": nuevo_estado,
@@ -600,25 +620,30 @@ async def pay_expense(expense_id: str, payment: PaymentCreate, current_user: dic
         "monto_restante": max(0, division["monto"] - nuevo_monto_pagado)
     }
 
+
 async def get_expense_with_details(expense: dict) -> dict:
     """Obtiene un gasto con toda la información de usuarios"""
-    # Info del pagador
     payer = await db.users.find_one({"id": expense["pagado_por"]})
+
     payer_info = {
         "id": payer["id"],
         "nombre": payer["nombre"],
         "foto_perfil": payer.get("foto_perfil")
-    } if payer else {"id": expense["pagado_por"], "nombre": "Usuario desconocido"}
-    
-    # Info de los deudores
+    } if payer else {
+        "id": expense["pagado_por"],
+        "nombre": "Usuario desconocido"
+    }
+
     divisiones_info = []
     all_paid = True
+
     for div in expense.get("divisiones", []):
         user = await db.users.find_one({"id": div["usuario_id"]})
-        # Recalculamos el estado
         estado = get_payment_status(div["monto_pagado"], div["monto"], expense["fecha"])
+
         if estado != "solvente":
             all_paid = False
+
         divisiones_info.append({
             "usuario": {
                 "id": user["id"] if user else div["usuario_id"],
@@ -629,7 +654,7 @@ async def get_expense_with_details(expense: dict) -> dict:
             "monto_pagado": div["monto_pagado"],
             "estado": estado
         })
-    
+
     return {
         "id": expense["id"],
         "grupo_id": expense["grupo_id"],

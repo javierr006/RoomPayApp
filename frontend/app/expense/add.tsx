@@ -1,9 +1,6 @@
 // ============================================================================
 // PANTALLA AGREGAR GASTO - Crear un nuevo gasto
 // ============================================================================
-// Permite crear un gasto con descripción, monto y elegir cómo dividirlo.
-// Puede ser división equitativa o manual.
-// ============================================================================
 
 import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, KeyboardAvoidingView, Platform, TextInput } from 'react-native';
@@ -15,7 +12,6 @@ import { useAuthStore } from '../../src/store/authStore';
 import { Button } from '../../src/components/Button';
 import { Colors } from '../../src/constants/colors';
 
-// Categorías disponibles
 const CATEGORIES = [
   { id: 'general', name: 'General', icon: 'receipt-outline' },
   { id: 'comida', name: 'Comida', icon: 'restaurant-outline' },
@@ -25,7 +21,6 @@ const CATEGORIES = [
   { id: 'entretenimiento', name: 'Entretenimiento', icon: 'game-controller-outline' },
 ];
 
-// Tipo para miembro del grupo
 interface Member {
   id: string;
   nombre: string;
@@ -33,11 +28,9 @@ interface Member {
 }
 
 export default function AddExpenseScreen() {
-  // Parámetros de la URL
   const { groupId, groupName } = useLocalSearchParams<{ groupId: string; groupName: string }>();
   const { user } = useAuthStore();
-  
-  // Estados del formulario
+
   const [descripcion, setDescripcion] = useState('');
   const [monto, setMonto] = useState('');
   const [categoria, setCategoria] = useState('general');
@@ -48,27 +41,26 @@ export default function AddExpenseScreen() {
   const [loading, setLoading] = useState(false);
   const [loadingMembers, setLoadingMembers] = useState(true);
 
-  // Cargar miembros del grupo
   useEffect(() => {
     const loadMembers = async () => {
       try {
         const group = await getGroup(groupId!);
-        setMembers(group.miembros);
-        // Seleccionar todos los miembros por defecto (excepto el usuario actual)
-        setSelectedMembers(group.miembros.filter((m: Member) => m.id !== user?.id).map((m: Member) => m.id));
+        setMembers(group.miembros || []);
+
+        // Seleccionamos a TODOS por defecto, incluyendo al usuario que paga.
+        setSelectedMembers((group.miembros || []).map((m: Member) => m.id));
       } catch (error) {
         console.error('Error cargando miembros:', error);
       } finally {
         setLoadingMembers(false);
       }
     };
-    
+
     if (groupId) {
       loadMembers();
     }
   }, [groupId]);
 
-  // Toggle selección de miembro
   const toggleMember = (memberId: string) => {
     if (selectedMembers.includes(memberId)) {
       setSelectedMembers(prev => prev.filter(id => id !== memberId));
@@ -77,51 +69,52 @@ export default function AddExpenseScreen() {
     }
   };
 
-  // Calcular monto por persona (división equitativa)
   const getAmountPerPerson = () => {
     const total = parseFloat(monto) || 0;
     const numPeople = selectedMembers.length;
+
     if (numPeople === 0) return 0;
+
     return total / numPeople;
   };
 
-  // Validar división manual
   const validateManualDivision = () => {
     const total = parseFloat(monto) || 0;
     let sum = 0;
+
     for (const memberId of selectedMembers) {
       sum += parseFloat(manualAmounts[memberId] || '0');
     }
-    return Math.abs(sum - total) < 0.01; // Tolerancia de 1 centavo
+
+    return Math.abs(sum - total) < 0.01;
   };
 
-  // Crear el gasto
   const handleCreateExpense = async () => {
-    // Validaciones
     if (!descripcion.trim()) {
       Alert.alert('Error', 'Ingresa una descripción para el gasto');
       return;
     }
-    
+
     const montoNum = parseFloat(monto);
+
     if (!monto || isNaN(montoNum) || montoNum <= 0) {
       Alert.alert('Error', 'Ingresa un monto válido');
       return;
     }
-    
+
     if (selectedMembers.length === 0) {
       Alert.alert('Error', 'Selecciona al menos un miembro para dividir');
       return;
     }
-    
+
     if (divisionType === 'manual' && !validateManualDivision()) {
       Alert.alert('Error', 'La suma de los montos manuales debe ser igual al total');
       return;
     }
 
     setLoading(true);
+
     try {
-      // Preparar datos del gasto
       const expenseData: any = {
         grupo_id: groupId,
         descripcion: descripcion.trim(),
@@ -129,17 +122,19 @@ export default function AddExpenseScreen() {
         categoria,
         dividir_entre: selectedMembers,
       };
-      
-      // Si es división manual, agregar los montos
+
       if (divisionType === 'manual') {
         const division: Record<string, number> = {};
+
         for (const memberId of selectedMembers) {
           division[memberId] = parseFloat(manualAmounts[memberId] || '0');
         }
+
         expenseData.division_manual = division;
       }
-      
+
       await createExpense(expenseData);
+
       Alert.alert('Éxito', 'Gasto creado correctamente', [
         { text: 'OK', onPress: () => router.back() }
       ]);
@@ -152,23 +147,21 @@ export default function AddExpenseScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['bottom']}>
-      <KeyboardAvoidingView 
+      <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.keyboardView}
       >
-        <ScrollView 
+        <ScrollView
           style={styles.content}
           contentContainerStyle={styles.scrollContent}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Info del grupo */}
           <View style={styles.groupInfo}>
             <Ionicons name="people" size={18} color={Colors.primary} />
             <Text style={styles.groupName}>{groupName}</Text>
           </View>
-          
-          {/* Campo de descripción */}
+
           <View style={styles.inputGroup}>
             <Text style={styles.label}>Descripción</Text>
             <TextInput
@@ -179,8 +172,7 @@ export default function AddExpenseScreen() {
               placeholderTextColor={Colors.textLight}
             />
           </View>
-          
-          {/* Campo de monto */}
+
           <View style={styles.inputGroup}>
             <Text style={styles.label}>Monto Total</Text>
             <View style={styles.montoContainer}>
@@ -195,8 +187,7 @@ export default function AddExpenseScreen() {
               />
             </View>
           </View>
-          
-          {/* Categoría */}
+
           <View style={styles.inputGroup}>
             <Text style={styles.label}>Categoría</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -210,10 +201,10 @@ export default function AddExpenseScreen() {
                     ]}
                     onPress={() => setCategoria(cat.id)}
                   >
-                    <Ionicons 
-                      name={cat.icon as any} 
-                      size={18} 
-                      color={categoria === cat.id ? Colors.white : Colors.text} 
+                    <Ionicons
+                      name={cat.icon as any}
+                      size={18}
+                      color={categoria === cat.id ? Colors.white : Colors.text}
                     />
                     <Text style={[
                       styles.categoryText,
@@ -226,8 +217,7 @@ export default function AddExpenseScreen() {
               </View>
             </ScrollView>
           </View>
-          
-          {/* Tipo de división */}
+
           <View style={styles.inputGroup}>
             <Text style={styles.label}>¿Cómo dividir?</Text>
             <View style={styles.divisionToggle}>
@@ -245,7 +235,7 @@ export default function AddExpenseScreen() {
                   Equitativa
                 </Text>
               </TouchableOpacity>
-              
+
               <TouchableOpacity
                 style={[
                   styles.divisionOption,
@@ -262,18 +252,19 @@ export default function AddExpenseScreen() {
               </TouchableOpacity>
             </View>
           </View>
-          
-          {/* Selección de miembros */}
+
           <View style={styles.inputGroup}>
             <Text style={styles.label}>Dividir entre</Text>
+
             {loadingMembers ? (
               <Text style={styles.loadingText}>Cargando miembros...</Text>
             ) : (
               <View style={styles.membersList}>
-                {members.filter(m => m.id !== user?.id).map((member) => {
+                {members.map((member) => {
                   const isSelected = selectedMembers.includes(member.id);
                   const amountPerPerson = getAmountPerPerson();
-                  
+                  const isCurrentUser = member.id === user?.id;
+
                   return (
                     <TouchableOpacity
                       key={member.id}
@@ -292,10 +283,13 @@ export default function AddExpenseScreen() {
                             <Ionicons name="checkmark" size={14} color={Colors.white} />
                           )}
                         </View>
-                        <Text style={styles.memberName}>{member.nombre}</Text>
+
+                        <Text style={styles.memberName}>
+                          {member.nombre}
+                          {isCurrentUser ? ' (vos)' : ''}
+                        </Text>
                       </View>
-                      
-                      {/* Monto (equitativo o manual) */}
+
                       {isSelected && (
                         divisionType === 'equal' ? (
                           <Text style={styles.memberAmount}>
@@ -322,8 +316,7 @@ export default function AddExpenseScreen() {
             )}
           </View>
         </ScrollView>
-        
-        {/* Botón de crear */}
+
         <View style={styles.footer}>
           <Button
             title="Crear Gasto"
@@ -351,8 +344,7 @@ const styles = StyleSheet.create({
   scrollContent: {
     padding: 20,
   },
-  
-  // Info del grupo
+
   groupInfo: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -367,8 +359,7 @@ const styles = StyleSheet.create({
     color: Colors.primary,
     marginLeft: 8,
   },
-  
-  // Campos del formulario
+
   inputGroup: {
     marginBottom: 24,
   },
@@ -387,8 +378,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Colors.border,
   },
-  
-  // Campo de monto
+
   montoContainer: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -411,8 +401,7 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     marginLeft: 4,
   },
-  
-  // Categorías
+
   categoriesRow: {
     flexDirection: 'row',
     paddingVertical: 4,
@@ -440,8 +429,7 @@ const styles = StyleSheet.create({
   categoryTextActive: {
     color: Colors.white,
   },
-  
-  // Tipo de división
+
   divisionToggle: {
     flexDirection: 'row',
     backgroundColor: Colors.card,
@@ -465,8 +453,7 @@ const styles = StyleSheet.create({
   divisionTextActive: {
     color: Colors.white,
   },
-  
-  // Lista de miembros
+
   loadingText: {
     color: Colors.textSecondary,
     textAlign: 'center',
@@ -527,8 +514,7 @@ const styles = StyleSheet.create({
     width: 80,
     textAlign: 'right',
   },
-  
-  // Footer
+
   footer: {
     padding: 20,
     paddingBottom: 10,
